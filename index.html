@@ -1,28 +1,92 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Live Canvas — Viewer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>Live Canvas — Viewer (Fit-to-screen)</title>
   <style>
-    body { font-family: system-ui, Arial; margin:0; background:#0b1220; color:#fff; display:flex; flex-direction:column; min-height:100vh; }
-    header{padding:12px;background:#071223;border-bottom:1px solid rgba(255,255,255,0.03)}
-    main{flex:1;display:flex;align-items:center;justify-content:center;padding:12px}
-    #canvas{width:100%;max-width:1000px;height:calc(100vh - 140px);background:#000;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden}
-    #canvas img{max-width:100%;max-height:100%;object-fit:contain}
-    .muted{color:#9aa4b2;font-size:13px}
-    pre{white-space:pre-wrap;color:#ddd;padding:12px}
+    :root{
+      --bg:#071223;
+      --muted:#9aa4b2;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:system-ui,Arial,Helvetica,sans-serif}
+    header{padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.03);display:flex;align-items:center;gap:12px}
+    header h1{font-size:15px;margin:0}
+    header .muted{color:var(--muted);font-size:13px;margin-left:auto}
+    main{display:flex;flex-direction:column;align-items:stretch;flex:1;padding:10px;box-sizing:border-box}
+    /* big canvas area that will fill remaining vertical space */
+    #canvasWrap{flex:1;display:flex;align-items:center;justify-content:center;min-height:0} /* min-height:0 fixes flex overflow on mobile */
+    #canvas{
+      width:100%;
+      height:100%;
+      max-height:100%;
+      background:#000;
+      border-radius:10px;
+      overflow:hidden;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      position:relative;
+    }
+
+    /* Image styling: fill available space but keep aspect ratio */
+    #canvas img{
+      width:100%;
+      height:100%;
+      object-fit:contain;
+      display:block;
+    }
+
+    /* Plain text renderer - responsive size */
+    .textRenderer{
+      padding:18px;
+      box-sizing:border-box;
+      width:100%;
+      height:100%;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+    }
+    .textRenderer .txt{
+      font-size: calc(18px + 2.5vw);
+      line-height: 1.2;
+      color:#fff;
+      word-break:break-word;
+    }
+
+    /* iframe for HTML snippets - we will set srcdoc and scale it to fit via CSS transform */
+    .htmlFrame{
+      width:100%;
+      height:100%;
+      border:0;
+      display:block;
+    }
+
+    /* small status bar */
+    footer{padding:10px 12px;border-top:1px solid rgba(255,255,255,0.03);display:flex;align-items:center;gap:12px}
+    .muted{color:var(--muted);font-size:13px}
+    .small{font-size:12px;color:var(--muted)}
   </style>
 </head>
 <body>
   <header>
-    <div><strong>Live Canvas — Viewer</strong> <span class="muted"> (auto-updates from sheet)</span></div>
-    <div class="muted" id="status">status: idle</div>
+    <h1>Live Canvas — Fit View</h1>
+    <div class="muted small" id="status">status: idle</div>
   </header>
 
   <main>
-    <div id="canvas"><div class="muted">Waiting for content in sheet A1...</div></div>
+    <div id="canvasWrap">
+      <div id="canvas">
+        <div class="muted">Waiting for content in sheet A1...</div>
+      </div>
+    </div>
   </main>
+
+  <footer>
+    <div class="muted">Sheet → A1 (polling)</div>
+    <div style="margin-left:auto" class="muted small">Auto-updates every 1.5s</div>
+  </footer>
 
 <script>
 /* ========== CONFIG ========== */
@@ -34,8 +98,10 @@ const POLL_INTERVAL_MS = 1500;
 
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('canvas');
+
 let lastValue = null;
 
+// Build gviz URL (returns javascript wrapper we parse)
 function gvizUrl(){
   return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?gid=${GID}&range=${RANGE}&tqx=responseHandler:cb`;
 }
@@ -62,49 +128,107 @@ async function fetchCell(){
   }
 }
 
-function renderValue(raw){
+function clearCanvas(){
   canvas.innerHTML = '';
-  if(!raw){ canvas.innerHTML = '<div class="muted">(A1 is empty)</div>'; return; }
+}
+
+function renderValue(raw){
+  clearCanvas();
+  if(!raw){
+    canvas.innerHTML = '<div class="muted">A1 is empty</div>';
+    return;
+  }
   const trimmed = String(raw).trim();
 
-  // JSON with slides
+  // 1) JSON with slides array
   if(trimmed.startsWith('{') && trimmed.includes('"slides"')){
     try {
       const o = JSON.parse(trimmed);
       if(Array.isArray(o.slides)){
         const idx = Math.max(0, Math.min(o.current || 0, o.slides.length - 1));
         const url = o.slides[idx];
-        showImageOrHtml(url); return;
+        renderImageOrHtml(url);
+        return;
       }
     } catch(e){}
   }
 
-  // direct image url
+  // 2) direct image url
   if(/^https?:\/\/.+\.(png|jpg|jpeg|webp|gif)(\?.*)?$/i.test(trimmed) || trimmed.startsWith('data:image/')){
-    showImageOrHtml(trimmed); return;
+    renderImageOrHtml(trimmed);
+    return;
   }
 
-  // raw HTML
+  // 3) If content starts with < and ends with > assume HTML snippet — render in iframe via srcdoc
   if(trimmed.startsWith('<') && trimmed.endsWith('>')){
-    canvas.innerHTML = trimmed; return;
+    renderHtmlSnippet(trimmed);
+    return;
   }
 
-  // plain text
-  const pre = document.createElement('pre'); pre.textContent = trimmed; canvas.appendChild(pre);
+  // 4) plain text (large responsive)
+  renderPlainText(trimmed);
 }
 
-function showImageOrHtml(src){
-  if(String(src).trim().startsWith('<')){ canvas.innerHTML = src; return; }
+// Renders an image that uses the full canvas while preserving aspect ratio
+function renderImageOrHtml(src){
+  // If src is an HTML snippet, treat it separately
+  if(String(src).trim().startsWith('<')){
+    renderHtmlSnippet(src);
+    return;
+  }
   const img = new Image();
-  img.onload = ()=>{ canvas.innerHTML = ''; canvas.appendChild(img); };
-  img.onerror = ()=>{ canvas.innerHTML = '<div class="muted">Unable to load image</div>'; };
-  img.src = src; img.style.maxWidth='100%'; img.style.maxHeight='100%'; img.style.objectFit='contain';
+  img.onload = ()=>{ clearCanvas(); img.className = 'fitImage'; img.style.maxWidth='100%'; img.style.maxHeight='100%'; img.style.objectFit='contain'; img.style.display='block'; canvas.appendChild(img); }
+  img.onerror = ()=>{ clearCanvas(); canvas.innerHTML = '<div class="muted">Unable to load image</div>'; }
+  img.src = src;
 }
 
+// Renders HTML snippet inside an iframe and scale it to fit using CSS inside the iframe
+function renderHtmlSnippet(html){
+  // create an iframe and write a wrapper style that makes body occupy full height and scale content responsively
+  clearCanvas();
+  const iframe = document.createElement('iframe');
+  iframe.className = 'htmlFrame';
+  // Build srcdoc: add meta viewport and base styles to ensure content fits mobile and uses responsive text
+  const srcdoc = `
+    <!doctype html><html><head>
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+    <style>
+      html,body{height:100%;margin:0;background:transparent;color:#fff;font-family:system-ui,Arial}
+      /* Let the content naturally flow. Use responsive text sizing for readability. */
+      body{display:flex;align-items:center;justify-content:center;padding:8px;box-sizing:border-box}
+      .content{max-width:100%;width:100%}
+      img{max-width:100%;height:auto;display:block}
+      h1,h2,h3{margin:0 0 8px 0}
+      p{margin:0}
+      /* make text responsive */
+      *{font-size: calc(14px + 1.6vw)}
+    </style>
+    </head><body><div class="content">${html}</div></body></html>
+  `;
+  iframe.srcdoc = srcdoc;
+  // append
+  canvas.appendChild(iframe);
+  // no additional scaling needed: srcdoc uses responsive font sizes
+}
+
+// Renders plain text centered with responsive font-size
+function renderPlainText(text){
+  clearCanvas();
+  const wrapper = document.createElement('div');
+  wrapper.className = 'textRenderer';
+  const inner = document.createElement('div');
+  inner.className = 'txt';
+  inner.textContent = text;
+  wrapper.appendChild(inner);
+  canvas.appendChild(wrapper);
+}
+
+// Poll loop
 async function pollLoop(){
   const val = await fetchCell();
-  if(val === null){ /* fetch error */ }
-  else {
+  if(val === null){
+    // error
+  } else {
     if(val !== lastValue){
       lastValue = val;
       renderValue(val);
@@ -116,7 +240,9 @@ async function pollLoop(){
   setTimeout(pollLoop, POLL_INTERVAL_MS);
 }
 
+// kick off
 pollLoop();
+
 </script>
 </body>
 </html>
