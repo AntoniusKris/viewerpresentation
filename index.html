@@ -3,14 +3,15 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Live Canvas — Open Image Link</title>
+<title>Live Canvas — Open Image Link (debug)</title>
 <style>
   :root{--bg:#071223;--muted:#9aa4b2}
   html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:system-ui,Arial}
-  #canvas{width:100%;height:100vh;display:flex;align-items:center;justify-content:center;background:#000}
+  #canvas{width:100%;height:100vh;display:flex;align-items:center;justify-content:center;background:#000;position:relative}
   #canvas img{width:100%;height:100%;object-fit:contain;display:block}
   .muted{color:var(--muted);font-size:13px;position:absolute;top:10px;left:12px}
-  #status{position:absolute;top:10px;right:12px;color:var(--muted);font-size:12px}
+  #status{position:absolute;top:10px;right:12px;color:var(--muted);font-size:12px;max-width:50%}
+  #debug{position:absolute;bottom:10px;left:12px;color:var(--muted);font-size:12px;max-width:calc(100% - 24px);background:rgba(255,255,255,0.02);padding:6px;border-radius:6px}
 </style>
 </head>
 <body>
@@ -18,19 +19,22 @@
     <div class="muted">Loading…</div>
   </div>
   <div id="status"></div>
+  <div id="debug"></div>
 
 <script>
-/* ====== CONFIG via query params (defaults tuned for your sheet) ====== */
+/* CONFIG via query params (defaults tuned for your sheet) */
 const Q = Object.fromEntries(new URLSearchParams(location.search));
 const SPREADSHEET_ID = Q.sheet || '1B3mGxqHlMCzUYLXR0dc0ExvhVSFXTHSNq3C6Nt_t0Es';
 const GID = Q.gid || '2094358974';
 const RANGE = Q.range || 'A1';
 const FALLBACK = Q.fallback || 'B1';
 const POLL_MS = parseInt(Q.poll || '1500', 10);
-/* ================================================================== */
 
 const canvas = document.getElementById('canvas');
 const statusEl = document.getElementById('status');
+const debugEl = document.getElementById('debug');
+
+function logDebug(...args){ console.log(...args); debugEl.textContent = args.map(a=> (typeof a==='object' ? JSON.stringify(a) : String(a)) ).join(' | '); }
 
 function gvizUrl(range){
   return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?gid=${GID}&range=${encodeURIComponent(range)}&tqx=responseHandler:cb`;
@@ -39,61 +43,108 @@ function gvizUrl(range){
 async function fetchCell(range){
   try {
     const res = await fetch(gvizUrl(range), { cache:'no-store' });
-    if(!res.ok) throw new Error('HTTP ' + res.status);
+    if(!res.ok) { logDebug('gviz HTTP', res.status); throw new Error('HTTP ' + res.status); }
     const txt = await res.text();
     const first = txt.indexOf('{'); const last = txt.lastIndexOf('}');
-    if(first === -1 || last === -1) throw new Error('unexpected');
+    if(first === -1 || last === -1){ logDebug('gviz format unexpected'); throw new Error('unexpected'); }
     const obj = JSON.parse(txt.slice(first, last+1));
     const rows = obj.table?.rows || [];
     if(rows.length === 0) return '';
     const c = rows[0].c && rows[0].c[0];
     const v = c ? (c.v ?? '') : '';
-    return String(v);
+    return String(v || '');
   } catch(err){
-    console.error(err);
-    statusEl.textContent = 'fetch error';
+    console.error('fetchCell error', err);
+    statusEl.textContent = 'fetch error: ' + (err.message || err);
+    logDebug('fetchCell error', err.message || err);
     return null;
   }
 }
 
-function isImageUrl(s){
-  if(!s) return false;
+/* detect/normalize many google drive url patterns into uc direct view link */
+function normalizeToDirectImageUrl(s){
+  if(!s) return '';
   s = s.trim();
-  if(s.startsWith('data:image/')) return true;
-  if(/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i.test(s)) return true;
-  // drive direct link pattern
-  if(/^https?:\/\/drive\.google\.com\/uc\?export=view&id=[A-Za-z0-9_-]+/.test(s)) return true;
-  return false;
+  // already direct uc link?
+  const ucPattern = /https?:\/\/drive\.google\.com\/uc\?export=view&id=([A-Za-z0-9_-]+)/i;
+  let m = s.match(ucPattern);
+  if(m) return `https://drive.google.com/uc?export=view&id=${m[1]}`;
+
+  // /file/d/ID/view or /file/d/ID/...
+  m = s.match(/\/file\/d\/([A-Za-z0-9_-]+)/i);
+  if(m) return `https://drive.google.com/uc?export=view&id=${m[1]}`;
+
+  // open?id=ID
+  m = s.match(/[?&]id=([A-Za-z0-9_-]+)/i);
+  if(m) return `https://drive.google.com/uc?export=view&id=${m[1]}`;
+
+  // direct link to googleusercontent (sometimes works)
+  if(/^https?:\/\/[a-z0-9.-]*googleusercontent\.com\//i.test(s)) return s;
+
+  // if ends with image extension, return as-is
+  if(/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i.test(s)) return s;
+
+  return ''; // not recognized
+}
+
+function renderMessage(msg){
+  canvas.innerHTML = `<div style="padding:20px;color:#fff;text-align:center;font-size:calc(18px + 2.5vw)">${msg}</div>`;
 }
 
 function showImage(url){
   canvas.innerHTML = '';
   const img = new Image();
-  img.onload = ()=>{ canvas.appendChild(img); statusEl.textContent = 'loaded ' + new Date().toLocaleTimeString(); };
-  img.onerror = ()=>{ canvas.innerHTML = '<div style="color:#eee;padding:12px">Unable to load image</div>'; statusEl.textContent = 'load error'; };
+  img.onload = ()=>{ canvas.appendChild(img); statusEl.textContent = 'loaded ' + new Date().toLocaleTimeString(); logDebug('loaded', url); };
+  img.onerror = (e)=>{ canvas.innerHTML = '<div style="color:#eee;padding:12px">Unable to load image</div>'; statusEl.textContent = 'load error'; logDebug('img.onerror', url, e); };
   img.src = url;
   img.style.objectFit = 'contain';
   img.style.width = '100%';
   img.style.height = '100%';
 }
 
+async function tryShowFromValue(val, label){
+  statusEl.textContent = 'checking ' + label;
+  logDebug('raw', label, val);
+  const normalized = normalizeToDirectImageUrl(val);
+  logDebug('normalized', normalized || '(none)');
+  if(normalized){
+    // quick test: open normalized URL in a fetch to see if it returns 200 (optional)
+    try {
+      const r = await fetch(normalized, { method:'HEAD' });
+      logDebug('HEAD', normalized, r.status);
+      if(r.ok) { showImage(normalized); return true; }
+      // HEAD might be blocked by Drive; try without HEAD and still attempt to set <img>
+      if(r.status === 200 || r.status === 0) { showImage(normalized); return true; }
+      // If Drive returns 403 etc, still attempt to set <img> because Drive may allow image embed even if HEAD blocked
+      showImage(normalized);
+      return true;
+    } catch(err){
+      logDebug('fetch HEAD error', err.message || err);
+      // fall through to still attempt image
+      showImage(normalized);
+      return true;
+    }
+  }
+  return false;
+}
+
 async function updateOnce(){
-  statusEl.textContent = 'checking...';
+  statusEl.textContent = 'checking primary cell';
   const v = await fetchCell(RANGE);
   if(v === null) { statusEl.textContent = 'error'; return; }
-  if(isImageUrl(v)){
-    showImage(v);
-    return;
-  }
-  // fallback cell
+  // if primary is direct url or drive link -> try show
+  const ok1 = await tryShowFromValue(v, RANGE);
+  if(ok1) return;
+
+  // else fallback
+  statusEl.textContent = 'checking fallback cell';
   const f = await fetchCell(FALLBACK);
   if(f === null) { statusEl.textContent = 'error'; return; }
-  if(isImageUrl(f)){
-    showImage(f);
-    return;
-  }
-  // not a URL — show raw text big
-  canvas.innerHTML = '<div style="padding:20px;color:#fff;text-align:center;font-size:calc(18px + 2.5vw)">' + (v || f || 'No image URL found in cells') + '</div>';
+  const ok2 = await tryShowFromValue(f, FALLBACK);
+  if(ok2) return;
+
+  // nothing found
+  renderMessage(v || f || 'No usable image URL found in ' + RANGE + ' or ' + FALLBACK);
   statusEl.textContent = 'no image url';
 }
 
@@ -102,7 +153,8 @@ async function loop(){
   await updateOnce();
   loopTimer = setTimeout(loop, POLL_MS);
 }
-// start
+
+// start the loop
 loop();
 </script>
 </body>
