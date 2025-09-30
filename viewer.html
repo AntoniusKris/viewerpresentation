@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Live Canvas — Viewer</title>
+  <style>
+    body { font-family: system-ui, Arial; margin:0; background:#0b1220; color:#fff; display:flex; flex-direction:column; min-height:100vh; }
+    header{padding:12px;background:#071223;border-bottom:1px solid rgba(255,255,255,0.03)}
+    main{flex:1;display:flex;align-items:center;justify-content:center;padding:12px}
+    #canvas{width:100%;max-width:1000px;height:calc(100vh - 140px);background:#000;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    #canvas img{max-width:100%;max-height:100%;object-fit:contain}
+    .muted{color:#9aa4b2;font-size:13px}
+    pre{white-space:pre-wrap;color:#ddd;padding:12px}
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>Live Canvas — Viewer</strong> <span class="muted"> (auto-updates from sheet)</span></div>
+    <div class="muted" id="status">status: idle</div>
+  </header>
+
+  <main>
+    <div id="canvas"><div class="muted">Waiting for content in sheet A1...</div></div>
+  </main>
+
+<script>
+/* ========== CONFIG ========== */
+const SPREADSHEET_ID = '1B3mGxqHlMCzUYLXR0dc0ExvhVSFXTHSNq3C6Nt_t0Es';
+const GID = '2094358974';
+const RANGE = 'A1';
+const POLL_INTERVAL_MS = 1500;
+/* ============================ */
+
+const statusEl = document.getElementById('status');
+const canvas = document.getElementById('canvas');
+let lastValue = null;
+
+function gvizUrl(){
+  return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?gid=${GID}&range=${RANGE}&tqx=responseHandler:cb`;
+}
+
+async function fetchCell(){
+  try {
+    statusEl.textContent = 'status: fetching...';
+    const res = await fetch(gvizUrl(), { cache: 'no-store' });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const txt = await res.text();
+    const first = txt.indexOf('{'); const last = txt.lastIndexOf('}');
+    if(first === -1 || last === -1) throw new Error('Unexpected response');
+    const jsonText = txt.slice(first, last+1);
+    const obj = JSON.parse(jsonText);
+    const rows = obj.table?.rows || [];
+    if(rows.length === 0) return '';
+    const cell = rows[0].c && rows[0].c[0];
+    const value = cell ? (cell.v ?? '') : '';
+    return value;
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'status: fetch error';
+    return null;
+  }
+}
+
+function renderValue(raw){
+  canvas.innerHTML = '';
+  if(!raw){ canvas.innerHTML = '<div class="muted">(A1 is empty)</div>'; return; }
+  const trimmed = String(raw).trim();
+
+  // JSON with slides
+  if(trimmed.startsWith('{') && trimmed.includes('"slides"')){
+    try {
+      const o = JSON.parse(trimmed);
+      if(Array.isArray(o.slides)){
+        const idx = Math.max(0, Math.min(o.current || 0, o.slides.length - 1));
+        const url = o.slides[idx];
+        showImageOrHtml(url); return;
+      }
+    } catch(e){}
+  }
+
+  // direct image url
+  if(/^https?:\/\/.+\.(png|jpg|jpeg|webp|gif)(\?.*)?$/i.test(trimmed) || trimmed.startsWith('data:image/')){
+    showImageOrHtml(trimmed); return;
+  }
+
+  // raw HTML
+  if(trimmed.startsWith('<') && trimmed.endsWith('>')){
+    canvas.innerHTML = trimmed; return;
+  }
+
+  // plain text
+  const pre = document.createElement('pre'); pre.textContent = trimmed; canvas.appendChild(pre);
+}
+
+function showImageOrHtml(src){
+  if(String(src).trim().startsWith('<')){ canvas.innerHTML = src; return; }
+  const img = new Image();
+  img.onload = ()=>{ canvas.innerHTML = ''; canvas.appendChild(img); };
+  img.onerror = ()=>{ canvas.innerHTML = '<div class="muted">Unable to load image</div>'; };
+  img.src = src; img.style.maxWidth='100%'; img.style.maxHeight='100%'; img.style.objectFit='contain';
+}
+
+async function pollLoop(){
+  const val = await fetchCell();
+  if(val === null){ /* fetch error */ }
+  else {
+    if(val !== lastValue){
+      lastValue = val;
+      renderValue(val);
+      statusEl.textContent = 'status: updated at ' + new Date().toLocaleTimeString();
+    } else {
+      statusEl.textContent = 'status: up-to-date ' + new Date().toLocaleTimeString();
+    }
+  }
+  setTimeout(pollLoop, POLL_INTERVAL_MS);
+}
+
+pollLoop();
+</script>
+</body>
+</html>
