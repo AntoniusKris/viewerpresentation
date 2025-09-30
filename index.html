@@ -1,248 +1,109 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Live Canvas — Viewer (Fit-to-screen)</title>
-  <style>
-    :root{
-      --bg:#071223;
-      --muted:#9aa4b2;
-    }
-    html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:system-ui,Arial,Helvetica,sans-serif}
-    header{padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.03);display:flex;align-items:center;gap:12px}
-    header h1{font-size:15px;margin:0}
-    header .muted{color:var(--muted);font-size:13px;margin-left:auto}
-    main{display:flex;flex-direction:column;align-items:stretch;flex:1;padding:10px;box-sizing:border-box}
-    /* big canvas area that will fill remaining vertical space */
-    #canvasWrap{flex:1;display:flex;align-items:center;justify-content:center;min-height:0} /* min-height:0 fixes flex overflow on mobile */
-    #canvas{
-      width:100%;
-      height:100%;
-      max-height:100%;
-      background:#000;
-      border-radius:10px;
-      overflow:hidden;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      position:relative;
-    }
-
-    /* Image styling: fill available space but keep aspect ratio */
-    #canvas img{
-      width:100%;
-      height:100%;
-      object-fit:contain;
-      display:block;
-    }
-
-    /* Plain text renderer - responsive size */
-    .textRenderer{
-      padding:18px;
-      box-sizing:border-box;
-      width:100%;
-      height:100%;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      text-align:center;
-    }
-    .textRenderer .txt{
-      font-size: calc(18px + 2.5vw);
-      line-height: 1.2;
-      color:#fff;
-      word-break:break-word;
-    }
-
-    /* iframe for HTML snippets - we will set srcdoc and scale it to fit via CSS transform */
-    .htmlFrame{
-      width:100%;
-      height:100%;
-      border:0;
-      display:block;
-    }
-
-    /* small status bar */
-    footer{padding:10px 12px;border-top:1px solid rgba(255,255,255,0.03);display:flex;align-items:center;gap:12px}
-    .muted{color:var(--muted);font-size:13px}
-    .small{font-size:12px;color:var(--muted)}
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Live Canvas — Open Image Link</title>
+<style>
+  :root{--bg:#071223;--muted:#9aa4b2}
+  html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:system-ui,Arial}
+  #canvas{width:100%;height:100vh;display:flex;align-items:center;justify-content:center;background:#000}
+  #canvas img{width:100%;height:100%;object-fit:contain;display:block}
+  .muted{color:var(--muted);font-size:13px;position:absolute;top:10px;left:12px}
+  #status{position:absolute;top:10px;right:12px;color:var(--muted);font-size:12px}
+</style>
 </head>
 <body>
-  <header>
-    <h1>Live Canvas — Fit View</h1>
-    <div class="muted small" id="status">status: idle</div>
-  </header>
-
-  <main>
-    <div id="canvasWrap">
-      <div id="canvas">
-        <div class="muted">Waiting for content in sheet A1...</div>
-      </div>
-    </div>
-  </main>
-
-  <footer>
-    <div class="muted">Sheet → A1 (polling)</div>
-    <div style="margin-left:auto" class="muted small">Auto-updates every 1.5s</div>
-  </footer>
+  <div id="canvas">
+    <div class="muted">Loading…</div>
+  </div>
+  <div id="status"></div>
 
 <script>
-/* ========== CONFIG ========== */
-const SPREADSHEET_ID = '1B3mGxqHlMCzUYLXR0dc0ExvhVSFXTHSNq3C6Nt_t0Es';
-const GID = '2094358974';
-const RANGE = 'A1';
-const POLL_INTERVAL_MS = 1500;
-/* ============================ */
+/* ====== CONFIG via query params (defaults tuned for your sheet) ====== */
+const Q = Object.fromEntries(new URLSearchParams(location.search));
+const SPREADSHEET_ID = Q.sheet || '1B3mGxqHlMCzUYLXR0dc0ExvhVSFXTHSNq3C6Nt_t0Es';
+const GID = Q.gid || '2094358974';
+const RANGE = Q.range || 'A1';
+const FALLBACK = Q.fallback || 'B1';
+const POLL_MS = parseInt(Q.poll || '1500', 10);
+/* ================================================================== */
 
-const statusEl = document.getElementById('status');
 const canvas = document.getElementById('canvas');
+const statusEl = document.getElementById('status');
 
-let lastValue = null;
-
-// Build gviz URL (returns javascript wrapper we parse)
-function gvizUrl(){
-  return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?gid=${GID}&range=${RANGE}&tqx=responseHandler:cb`;
+function gvizUrl(range){
+  return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?gid=${GID}&range=${encodeURIComponent(range)}&tqx=responseHandler:cb`;
 }
 
-async function fetchCell(){
+async function fetchCell(range){
   try {
-    statusEl.textContent = 'status: fetching...';
-    const res = await fetch(gvizUrl(), { cache: 'no-store' });
+    const res = await fetch(gvizUrl(range), { cache:'no-store' });
     if(!res.ok) throw new Error('HTTP ' + res.status);
     const txt = await res.text();
     const first = txt.indexOf('{'); const last = txt.lastIndexOf('}');
-    if(first === -1 || last === -1) throw new Error('Unexpected response');
-    const jsonText = txt.slice(first, last+1);
-    const obj = JSON.parse(jsonText);
+    if(first === -1 || last === -1) throw new Error('unexpected');
+    const obj = JSON.parse(txt.slice(first, last+1));
     const rows = obj.table?.rows || [];
     if(rows.length === 0) return '';
-    const cell = rows[0].c && rows[0].c[0];
-    const value = cell ? (cell.v ?? '') : '';
-    return value;
-  } catch (err) {
+    const c = rows[0].c && rows[0].c[0];
+    const v = c ? (c.v ?? '') : '';
+    return String(v);
+  } catch(err){
     console.error(err);
-    statusEl.textContent = 'status: fetch error';
+    statusEl.textContent = 'fetch error';
     return null;
   }
 }
 
-function clearCanvas(){
+function isImageUrl(s){
+  if(!s) return false;
+  s = s.trim();
+  if(s.startsWith('data:image/')) return true;
+  if(/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i.test(s)) return true;
+  // drive direct link pattern
+  if(/^https?:\/\/drive\.google\.com\/uc\?export=view&id=[A-Za-z0-9_-]+/.test(s)) return true;
+  return false;
+}
+
+function showImage(url){
   canvas.innerHTML = '';
-}
-
-function renderValue(raw){
-  clearCanvas();
-  if(!raw){
-    canvas.innerHTML = '<div class="muted">A1 is empty</div>';
-    return;
-  }
-  const trimmed = String(raw).trim();
-
-  // 1) JSON with slides array
-  if(trimmed.startsWith('{') && trimmed.includes('"slides"')){
-    try {
-      const o = JSON.parse(trimmed);
-      if(Array.isArray(o.slides)){
-        const idx = Math.max(0, Math.min(o.current || 0, o.slides.length - 1));
-        const url = o.slides[idx];
-        renderImageOrHtml(url);
-        return;
-      }
-    } catch(e){}
-  }
-
-  // 2) direct image url
-  if(/^https?:\/\/.+\.(png|jpg|jpeg|webp|gif)(\?.*)?$/i.test(trimmed) || trimmed.startsWith('data:image/')){
-    renderImageOrHtml(trimmed);
-    return;
-  }
-
-  // 3) If content starts with < and ends with > assume HTML snippet — render in iframe via srcdoc
-  if(trimmed.startsWith('<') && trimmed.endsWith('>')){
-    renderHtmlSnippet(trimmed);
-    return;
-  }
-
-  // 4) plain text (large responsive)
-  renderPlainText(trimmed);
-}
-
-// Renders an image that uses the full canvas while preserving aspect ratio
-function renderImageOrHtml(src){
-  // If src is an HTML snippet, treat it separately
-  if(String(src).trim().startsWith('<')){
-    renderHtmlSnippet(src);
-    return;
-  }
   const img = new Image();
-  img.onload = ()=>{ clearCanvas(); img.className = 'fitImage'; img.style.maxWidth='100%'; img.style.maxHeight='100%'; img.style.objectFit='contain'; img.style.display='block'; canvas.appendChild(img); }
-  img.onerror = ()=>{ clearCanvas(); canvas.innerHTML = '<div class="muted">Unable to load image</div>'; }
-  img.src = src;
+  img.onload = ()=>{ canvas.appendChild(img); statusEl.textContent = 'loaded ' + new Date().toLocaleTimeString(); };
+  img.onerror = ()=>{ canvas.innerHTML = '<div style="color:#eee;padding:12px">Unable to load image</div>'; statusEl.textContent = 'load error'; };
+  img.src = url;
+  img.style.objectFit = 'contain';
+  img.style.width = '100%';
+  img.style.height = '100%';
 }
 
-// Renders HTML snippet inside an iframe and scale it to fit using CSS inside the iframe
-function renderHtmlSnippet(html){
-  // create an iframe and write a wrapper style that makes body occupy full height and scale content responsively
-  clearCanvas();
-  const iframe = document.createElement('iframe');
-  iframe.className = 'htmlFrame';
-  // Build srcdoc: add meta viewport and base styles to ensure content fits mobile and uses responsive text
-  const srcdoc = `
-    <!doctype html><html><head>
-    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-    <style>
-      html,body{height:100%;margin:0;background:transparent;color:#fff;font-family:system-ui,Arial}
-      /* Let the content naturally flow. Use responsive text sizing for readability. */
-      body{display:flex;align-items:center;justify-content:center;padding:8px;box-sizing:border-box}
-      .content{max-width:100%;width:100%}
-      img{max-width:100%;height:auto;display:block}
-      h1,h2,h3{margin:0 0 8px 0}
-      p{margin:0}
-      /* make text responsive */
-      *{font-size: calc(14px + 1.6vw)}
-    </style>
-    </head><body><div class="content">${html}</div></body></html>
-  `;
-  iframe.srcdoc = srcdoc;
-  // append
-  canvas.appendChild(iframe);
-  // no additional scaling needed: srcdoc uses responsive font sizes
-}
-
-// Renders plain text centered with responsive font-size
-function renderPlainText(text){
-  clearCanvas();
-  const wrapper = document.createElement('div');
-  wrapper.className = 'textRenderer';
-  const inner = document.createElement('div');
-  inner.className = 'txt';
-  inner.textContent = text;
-  wrapper.appendChild(inner);
-  canvas.appendChild(wrapper);
-}
-
-// Poll loop
-async function pollLoop(){
-  const val = await fetchCell();
-  if(val === null){
-    // error
-  } else {
-    if(val !== lastValue){
-      lastValue = val;
-      renderValue(val);
-      statusEl.textContent = 'status: updated at ' + new Date().toLocaleTimeString();
-    } else {
-      statusEl.textContent = 'status: up-to-date ' + new Date().toLocaleTimeString();
-    }
+async function updateOnce(){
+  statusEl.textContent = 'checking...';
+  const v = await fetchCell(RANGE);
+  if(v === null) { statusEl.textContent = 'error'; return; }
+  if(isImageUrl(v)){
+    showImage(v);
+    return;
   }
-  setTimeout(pollLoop, POLL_INTERVAL_MS);
+  // fallback cell
+  const f = await fetchCell(FALLBACK);
+  if(f === null) { statusEl.textContent = 'error'; return; }
+  if(isImageUrl(f)){
+    showImage(f);
+    return;
+  }
+  // not a URL — show raw text big
+  canvas.innerHTML = '<div style="padding:20px;color:#fff;text-align:center;font-size:calc(18px + 2.5vw)">' + (v || f || 'No image URL found in cells') + '</div>';
+  statusEl.textContent = 'no image url';
 }
 
-// kick off
-pollLoop();
-
+let loopTimer = null;
+async function loop(){
+  await updateOnce();
+  loopTimer = setTimeout(loop, POLL_MS);
+}
+// start
+loop();
 </script>
 </body>
 </html>
